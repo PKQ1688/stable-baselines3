@@ -1,18 +1,23 @@
+import base64
 import io
+import json
 import os
 import pathlib
+import tempfile
 import warnings
+import zipfile
 from collections import OrderedDict
 from copy import deepcopy
 
-import gym
+import gymnasium as gym
 import numpy as np
 import pytest
 import torch as th
 
 from stable_baselines3 import A2C, DDPG, DQN, PPO, SAC, TD3
 from stable_baselines3.common.base_class import BaseAlgorithm
-from stable_baselines3.common.identity_env import FakeImageEnv, IdentityEnv, IdentityEnvBox
+from stable_baselines3.common.env_util import make_vec_env
+from stable_baselines3.common.envs import FakeImageEnv, IdentityEnv, IdentityEnvBox
 from stable_baselines3.common.save_util import load_from_pkl, open_path, save_to_pkl
 from stable_baselines3.common.utils import get_device
 from stable_baselines3.common.vec_env import DummyVecEnv
@@ -27,7 +32,7 @@ def select_env(model_class: BaseAlgorithm) -> gym.Env:
     if model_class == DQN:
         return IdentityEnv(10)
     else:
-        return IdentityEnvBox(10)
+        return IdentityEnvBox(-10, 10)
 
 
 @pytest.mark.parametrize("model_class", MODEL_LIST)
@@ -64,7 +69,7 @@ def test_save_load(tmp_path, model_class):
         model.set_parameters(invalid_object_params, exact_match=False)
 
     # Test that exact_match catches when something was missed.
-    missing_object_params = dict((k, v) for k, v in list(original_params.items())[:-1])
+    missing_object_params = {k: v for k, v in list(original_params.items())[:-1]}
     with pytest.raises(ValueError):
         model.set_parameters(missing_object_params, exact_match=True)
 
@@ -163,9 +168,10 @@ def test_save_load(tmp_path, model_class):
 
 
 @pytest.mark.parametrize("model_class", MODEL_LIST)
-def test_set_env(model_class):
+def test_set_env(tmp_path, model_class):
     """
     Test if set_env function does work correct
+
     :param model_class: (BaseAlgorithm) A RL model
     """
 
@@ -173,27 +179,67 @@ def test_set_env(model_class):
     env = DummyVecEnv([lambda: select_env(model_class)])
     env2 = DummyVecEnv([lambda: select_env(model_class)])
     env3 = select_env(model_class)
+    env4 = DummyVecEnv([lambda: select_env(model_class) for _ in range(2)])
 
     kwargs = {}
     if model_class in {DQN, DDPG, SAC, TD3}:
-        kwargs = dict(learning_starts=100, train_freq=4)
+        kwargs = dict(learning_starts=50, train_freq=4)
     elif model_class in {A2C, PPO}:
         kwargs = dict(n_steps=64)
 
     # create model
     model = model_class("MlpPolicy", env, policy_kwargs=dict(net_arch=[16]), **kwargs)
     # learn
-    model.learn(total_timesteps=128)
+    model.learn(total_timesteps=64)
 
     # change env
-    model.set_env(env2)
+    model.set_env(env2, force_reset=True)
+    # Check that last obs was discarded
+    assert model._last_obs is None
     # learn again
-    model.learn(total_timesteps=128)
+    model.learn(total_timesteps=64, reset_num_timesteps=True)
+    assert model.num_timesteps == 64
 
     # change env test wrapping
     model.set_env(env3)
     # learn again
-    model.learn(total_timesteps=128)
+    model.learn(total_timesteps=64)
+
+    # num_env must be the same
+    with pytest.raises(AssertionError):
+        model.set_env(env4)
+
+    # Keep the same env, disable reset
+    model.set_env(model.get_env(), force_reset=False)
+    assert model._last_obs is not None
+    # learn again
+    model.learn(total_timesteps=64, reset_num_timesteps=False)
+    assert model.num_timesteps == 2 * 64
+
+    current_env = model.get_env()
+    model.save(tmp_path / "test_save.zip")
+    del model
+    # Check that we can keep the number of timesteps after loading
+    # Here the env kept its state so we don't have to reset
+    model = model_class.load(tmp_path / "test_save.zip", env=current_env, force_reset=False)
+    assert model._last_obs is not None
+    model.learn(total_timesteps=64, reset_num_timesteps=False)
+    assert model.num_timesteps == 3 * 64
+
+    del model
+    # We are changing the env, the env must reset but we should keep the number of timesteps
+    model = model_class.load(tmp_path / "test_save.zip", env=env3, force_reset=True)
+    assert model._last_obs is None
+    model.learn(total_timesteps=64, reset_num_timesteps=False)
+    assert model.num_timesteps == 3 * 64
+
+    del model
+    # Load the model with a different number of environments
+    model = model_class.load(tmp_path / "test_save.zip", env=env4)
+    model.learn(total_timesteps=64)
+
+    # Clear saved file
+    os.remove(tmp_path / "test_save.zip")
 
 
 @pytest.mark.parametrize("model_class", MODEL_LIST)
@@ -222,7 +268,11 @@ def test_exclude_include_saved_params(tmp_path, model_class):
     del model
     # Load with custom objects
     custom_objects = dict(learning_rate=2e-5, dummy=1.0)
-    model = model_class.load(str(tmp_path / "test_save.zip"), custom_objects=custom_objects)
+    model = model_class.load(
+        str(tmp_path / "test_save.zip"),
+        custom_objects=custom_objects,
+        print_system_info=True,
+    )
     assert model.verbose == 2
     # Check that the custom object was taken into account
     assert model.learning_rate == custom_objects["learning_rate"]
@@ -234,21 +284,40 @@ def test_exclude_include_saved_params(tmp_path, model_class):
 
 
 def test_save_load_pytorch_var(tmp_path):
-    model = SAC("MlpPolicy", "Pendulum-v0", seed=3, policy_kwargs=dict(net_arch=[64], n_critics=1))
+    model = SAC("MlpPolicy", "Pendulum-v1", seed=3, policy_kwargs=dict(net_arch=[64], n_critics=1))
     model.learn(200)
     save_path = str(tmp_path / "sac_pendulum")
     model.save(save_path)
     env = model.get_env()
-    ent_coef_before = model.log_ent_coef
+    log_ent_coef_before = model.log_ent_coef
 
     del model
 
     model = SAC.load(save_path, env=env)
-    assert th.allclose(ent_coef_before, model.log_ent_coef)
+    assert th.allclose(log_ent_coef_before, model.log_ent_coef)
     model.learn(200)
-    ent_coef_after = model.log_ent_coef
+    log_ent_coef_after = model.log_ent_coef
     # Check that the entropy coefficient is still optimized
-    assert not th.allclose(ent_coef_before, ent_coef_after)
+    assert not th.allclose(log_ent_coef_before, log_ent_coef_after)
+
+    # With a fixed entropy coef
+    model = SAC("MlpPolicy", "Pendulum-v1", seed=3, ent_coef=0.01, policy_kwargs=dict(net_arch=[64], n_critics=1))
+    model.learn(200)
+    save_path = str(tmp_path / "sac_pendulum")
+    model.save(save_path)
+    env = model.get_env()
+    assert model.log_ent_coef is None
+    ent_coef_before = model.ent_coef_tensor
+
+    del model
+
+    model = SAC.load(save_path, env=env)
+    assert th.allclose(ent_coef_before, model.ent_coef_tensor)
+    model.learn(200)
+    ent_coef_after = model.ent_coef_tensor
+    assert model.log_ent_coef is None
+    # Check that the entropy coefficient is still the same
+    assert th.allclose(ent_coef_before, ent_coef_after)
 
 
 @pytest.mark.parametrize("model_class", [A2C, TD3])
@@ -271,6 +340,14 @@ def test_save_load_env_cnn(tmp_path, model_class):
     # clear file from os
     os.remove(tmp_path / "test_save.zip")
 
+    # Check we can load A2C/PPO models saved with SB3 < 1.7.0
+    if model_class == A2C:
+        del model.policy.pi_features_extractor
+        model.save(tmp_path / "test_save")
+        with pytest.warns(UserWarning):
+            model_class.load(str(tmp_path / "test_save.zip"), env=env, **kwargs).learn(100)
+        os.remove(tmp_path / "test_save.zip")
+
 
 @pytest.mark.parametrize("model_class", [SAC, TD3, DQN])
 def test_save_load_replay_buffer(tmp_path, model_class):
@@ -283,12 +360,19 @@ def test_save_load_replay_buffer(tmp_path, model_class):
     old_replay_buffer = deepcopy(model.replay_buffer)
     model.save_replay_buffer(path)
     model.replay_buffer = None
-    model.load_replay_buffer(path)
+    for device in ["cpu", "cuda"]:
+        # Manually force device to check that the replay buffer device
+        # is correctly updated
+        model.device = th.device(device)
+        model.load_replay_buffer(path)
+        assert model.replay_buffer.device.type == model.device.type
 
     assert np.allclose(old_replay_buffer.observations, model.replay_buffer.observations)
     assert np.allclose(old_replay_buffer.actions, model.replay_buffer.actions)
     assert np.allclose(old_replay_buffer.rewards, model.replay_buffer.rewards)
     assert np.allclose(old_replay_buffer.dones, model.replay_buffer.dones)
+    assert np.allclose(old_replay_buffer.timeouts, model.replay_buffer.timeouts)
+    infos = [[{"TimeLimit.truncated": truncated}] for truncated in old_replay_buffer.timeouts]
 
     # test extending replay buffer
     model.replay_buffer.extend(
@@ -297,6 +381,7 @@ def test_save_load_replay_buffer(tmp_path, model_class):
         old_replay_buffer.actions,
         old_replay_buffer.rewards,
         old_replay_buffer.dones,
+        infos,
     )
 
 
@@ -318,6 +403,9 @@ def test_warn_buffer(recwarn, model_class, optimize_memory_usage):
         select_env(model_class),
         buffer_size=100,
         optimize_memory_usage=optimize_memory_usage,
+        # we cannot use optimize_memory_usage and handle_timeout_termination
+        # at the same time
+        replay_buffer_kwargs={"handle_timeout_termination": not optimize_memory_usage},
         policy_kwargs=dict(net_arch=[64]),
         learning_starts=10,
     )
@@ -389,7 +477,7 @@ def test_save_load_policy(tmp_path, model_class, policy_str, use_sde):
     params = deepcopy(policy.state_dict())
 
     # Modify all parameters to be random values
-    random_params = dict((param_name, th.rand_like(param)) for param_name, param in params.items())
+    random_params = {param_name: th.rand_like(param) for param_name, param in params.items()}
 
     # Update model parameters with the new random values
     policy.load_state_dict(random_params)
@@ -480,7 +568,7 @@ def test_save_load_q_net(tmp_path, model_class, policy_str):
     params = deepcopy(q_net.state_dict())
 
     # Modify all parameters to be random values
-    random_params = dict((param_name, th.rand_like(param)) for param_name, param in params.items())
+    random_params = {param_name: th.rand_like(param) for param_name, param in params.items()}
 
     # Update model parameters with the new random values
     q_net.load_state_dict(random_params)
@@ -523,7 +611,7 @@ def test_open_file_str_pathlib(tmp_path, pathtype):
     with open_path(pathtype(f"{tmp_path}/t1"), "w") as fp1:
         save_to_pkl(fp1, "foo")
     assert fp1.closed
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings(record=True) as record:
         assert load_from_pkl(pathtype(f"{tmp_path}/t1")) == "foo"
     assert not record
 
@@ -531,7 +619,7 @@ def test_open_file_str_pathlib(tmp_path, pathtype):
     with open_path(pathtype(f"{tmp_path}/t1.custom_ext"), "w") as fp1:
         save_to_pkl(fp1, "foo")
     assert fp1.closed
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings(record=True) as record:
         assert load_from_pkl(pathtype(f"{tmp_path}/t1.custom_ext")) == "foo"
     assert not record
 
@@ -539,7 +627,7 @@ def test_open_file_str_pathlib(tmp_path, pathtype):
     with open_path(pathtype(f"{tmp_path}/t1"), "w", suffix="pkl") as fp1:
         save_to_pkl(fp1, "foo")
     assert fp1.closed
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings(record=True) as record:
         assert load_from_pkl(pathtype(f"{tmp_path}/t1.pkl")) == "foo"
     assert not record
 
@@ -547,11 +635,11 @@ def test_open_file_str_pathlib(tmp_path, pathtype):
     with open_path(pathtype(f"{tmp_path}/t2.pkl"), "w") as fp1:
         save_to_pkl(fp1, "foo")
     assert fp1.closed
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings(record=True) as record:
         assert load_from_pkl(open_path(pathtype(f"{tmp_path}/t2"), "r", suffix="pkl")) == "foo"
     assert len(record) == 0
 
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings(record=True) as record:
         assert load_from_pkl(open_path(pathtype(f"{tmp_path}/t2"), "r", suffix="pkl", verbose=2)) == "foo"
     assert len(record) == 1
 
@@ -559,7 +647,7 @@ def test_open_file_str_pathlib(tmp_path, pathtype):
     fp.write("rubbish")
     fp.close()
     # test that a warning is only raised when verbose = 0
-    with pytest.warns(None) as record:
+    with warnings.catch_warnings(record=True) as record:
         open_path(pathtype(f"{tmp_path}/t2"), "w", suffix="pkl", verbose=0).close()
         open_path(pathtype(f"{tmp_path}/t2"), "w", suffix="pkl", verbose=1).close()
         open_path(pathtype(f"{tmp_path}/t2"), "w", suffix="pkl", verbose=2).close()
@@ -567,7 +655,6 @@ def test_open_file_str_pathlib(tmp_path, pathtype):
 
 
 def test_open_file(tmp_path):
-
     # path must much the type
     with pytest.raises(TypeError):
         open_path(123, None, None, None)
@@ -594,8 +681,143 @@ def test_open_file(tmp_path):
     buff = io.BytesIO()
     assert buff.writable()
     assert buff.readable() is ("w" == "w")
-    _ = open_path(buff, "w")
-    assert _ is buff
+    opened_buffer = open_path(buff, "w")
+    assert opened_buffer is buff
     with pytest.raises(ValueError):
         buff.close()
         open_path(buff, "w")
+
+
+@pytest.mark.expensive
+def test_save_load_large_model(tmp_path):
+    """
+    Test saving and loading a model with a large policy that is greater than 2GB. We
+    test only one algorithm since all algorithms share the same code for loading and
+    saving the model.
+    """
+    env = select_env(TD3)
+    kwargs = dict(policy_kwargs=dict(net_arch=[8192, 8192, 8192]), device="cpu")
+    model = TD3("MlpPolicy", env, **kwargs)
+
+    # test saving
+    model.save(tmp_path / "test_save")
+
+    # test loading
+    model = TD3.load(str(tmp_path / "test_save.zip"), env=env, **kwargs)
+
+    # clear file from os
+    os.remove(tmp_path / "test_save.zip")
+
+
+def test_load_invalid_object(tmp_path):
+    # See GH Issue #1122 for an example
+    # of invalid object loading
+    path = str(tmp_path / "ppo_pendulum.zip")
+    PPO("MlpPolicy", "Pendulum-v1", learning_rate=lambda _: 1.0).save(path)
+
+    with zipfile.ZipFile(path, mode="r") as archive:
+        json_data = json.loads(archive.read("data").decode())
+
+    # Intentionally corrupt the data
+    serialization = json_data["learning_rate"][":serialized:"]
+    base64_object = base64.b64decode(serialization.encode())
+    new_bytes = base64_object.replace(b"CodeType", b"CodeTyps")
+    base64_encoded = base64.b64encode(new_bytes).decode()
+    json_data["learning_rate"][":serialized:"] = base64_encoded
+    serialized_data = json.dumps(json_data, indent=4)
+
+    with open(tmp_path / "data", "w") as f:
+        f.write(serialized_data)
+    # Replace with the corrupted file
+    # probably doesn't work on windows
+    os.system(f"cd {tmp_path}; zip ppo_pendulum.zip data")
+    with pytest.warns(UserWarning, match=r"custom_objects"):
+        PPO.load(path)
+    # Load with custom object, no warnings
+    with warnings.catch_warnings(record=True) as record:
+        PPO.load(path, custom_objects=dict(learning_rate=lambda _: 1.0))
+    assert len(record) == 0
+
+
+def test_dqn_target_update_interval(tmp_path):
+    # `target_update_interval` should not change when reloading the model. See GH Issue #1373.
+    env = make_vec_env(env_id="CartPole-v1", n_envs=2)
+    model = DQN("MlpPolicy", env, verbose=1, target_update_interval=100)
+    model.save(tmp_path / "dqn_cartpole")
+    del model
+    model = DQN.load(tmp_path / "dqn_cartpole")
+    os.remove(tmp_path / "dqn_cartpole.zip")
+    assert model.target_update_interval == 100
+
+
+# Turn warnings into errors
+@pytest.mark.filterwarnings("error")
+def test_no_resource_warning(tmp_path):
+    # Check behavior of save/load
+    # see https://github.com/DLR-RM/stable-baselines3/issues/1751
+
+    # check that files are properly closed
+    # Create a PPO agent and save it
+    PPO("MlpPolicy", "CartPole-v1").save(tmp_path / "dqn_cartpole")
+    PPO.load(tmp_path / "dqn_cartpole")
+
+    PPO("MlpPolicy", "CartPole-v1").save(str(tmp_path / "dqn_cartpole"))
+    PPO.load(str(tmp_path / "dqn_cartpole"))
+
+    # Do the same but in memory, should not close the file
+    with tempfile.TemporaryFile() as fp:
+        PPO("MlpPolicy", "CartPole-v1").save(fp)
+        PPO.load(fp)
+        assert not fp.closed
+
+    # Same but with replay buffer
+    model = SAC("MlpPolicy", "Pendulum-v1", buffer_size=200)
+    model.save_replay_buffer(tmp_path / "replay")
+    model.load_replay_buffer(tmp_path / "replay")
+
+    model.save_replay_buffer(str(tmp_path / "replay"))
+    model.load_replay_buffer(str(tmp_path / "replay"))
+
+    with tempfile.TemporaryFile() as fp:
+        model.save_replay_buffer(fp)
+        fp.seek(0)
+        model.load_replay_buffer(fp)
+        assert not fp.closed
+
+
+def test_cast_lr_schedule(tmp_path):
+    # See GH#1900
+    model = PPO("MlpPolicy", "Pendulum-v1", learning_rate=lambda t: t * np.sin(1.0))
+    # Note: for recent version of numpy, np.float64 is a subclass of float
+    # so we need to use type here
+    # assert isinstance(model.lr_schedule(1.0), float)
+    assert type(model.lr_schedule(1.0)) is float
+    assert np.allclose(model.lr_schedule(0.5), 0.5 * np.sin(1.0))
+    model.save(tmp_path / "ppo.zip")
+    model = PPO.load(tmp_path / "ppo.zip")
+    assert type(model.lr_schedule(1.0)) is float
+    assert np.allclose(model.lr_schedule(0.5), 0.5 * np.sin(1.0))
+
+
+def test_save_load_net_arch_none(tmp_path):
+    """
+    Test that the model is loaded correctly when net_arch is manually set to None.
+    See GH#1928
+    """
+    PPO("MlpPolicy", "CartPole-v1", policy_kwargs=dict(net_arch=None)).save(tmp_path / "ppo.zip")
+    model = PPO.load(tmp_path / "ppo.zip")
+    # None has been replaced by the default net arch
+    assert model.policy.net_arch is not None
+    os.remove(tmp_path / "ppo.zip")
+
+
+def test_save_load_no_target_params(tmp_path):
+    # Check we can load DQN models saved with SB3 < 2.4.0
+    model = DQN("MlpPolicy", "CartPole-v1", buffer_size=10000, learning_starts=4)
+    env = model.get_env()
+    # Include target net params
+    model.policy.optimizer = th.optim.Adam(model.policy.parameters(), lr=0.001)
+    model.save(tmp_path / "test_save")
+    with pytest.warns(UserWarning):
+        DQN.load(str(tmp_path / "test_save.zip"), env=env).learn(20)
+    os.remove(tmp_path / "test_save.zip")

@@ -12,6 +12,8 @@ It is the next major version of `Stable Baselines <https://github.com/hill-a/sta
 
 Github repository: https://github.com/DLR-RM/stable-baselines3
 
+Paper: https://jmlr.org/papers/volume22/20-1364/20-1364.pdf
+
 RL Baselines3 Zoo (training framework for SB3): https://github.com/DLR-RM/rl-baselines3-zoo
 
 RL Baselines3 Zoo provides a collection of pre-trained agents, scripts for training, evaluating agents, tuning hyperparameters, plotting results and recording videos.
@@ -42,12 +44,14 @@ Main Features
    guide/algos
    guide/examples
    guide/vec_envs
-   guide/custom_env
    guide/custom_policy
+   guide/custom_env
    guide/callbacks
    guide/tensorboard
+   guide/integrations
    guide/rl_zoo
    guide/sb3_contrib
+   guide/sbx
    guide/imitation
    guide/migration
    guide/checking_nan
@@ -75,6 +79,7 @@ Main Features
 
   common/atari_wrappers
   common/env_util
+  common/envs
   common/distributions
   common/evaluation
   common/env_checker
@@ -97,14 +102,16 @@ To cite this project in publications:
 
 .. code-block:: bibtex
 
-    @misc{stable-baselines3,
-      author = {Raffin, Antonin and Hill, Ashley and Ernestus, Maximilian and Gleave, Adam and Kanervisto, Anssi and Dormann, Noah},
-      title = {Stable Baselines3},
-      year = {2019},
-      publisher = {GitHub},
-      journal = {GitHub repository},
-      howpublished = {\url{https://github.com/DLR-RM/stable-baselines3}},
-    }
+  @article{stable-baselines3,
+    author  = {Antonin Raffin and Ashley Hill and Adam Gleave and Anssi Kanervisto and Maximilian Ernestus and Noah Dormann},
+    title   = {Stable-Baselines3: Reliable Reinforcement Learning Implementations},
+    journal = {Journal of Machine Learning Research},
+    year    = {2021},
+    volume  = {22},
+    number  = {268},
+    pages   = {1-8},
+    url     = {http://jmlr.org/papers/v22/20-1364.html}
+  }
 
 Contributing
 ------------

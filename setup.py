@@ -2,7 +2,7 @@ import os
 
 from setuptools import find_packages, setup
 
-with open(os.path.join("stable_baselines3", "version.txt"), "r") as file_handler:
+with open(os.path.join("stable_baselines3", "version.txt")) as file_handler:
     __version__ = file_handler.read().strip()
 
 
@@ -39,33 +39,60 @@ Most of the library tries to follow a sklearn-like syntax for the Reinforcement 
 Here is a quick example of how to train and run PPO on a cartpole environment:
 
 ```python
-import gym
+import gymnasium
 
 from stable_baselines3 import PPO
 
-env = gym.make('CartPole-v1')
+env = gymnasium.make("CartPole-v1", render_mode="human")
 
-model = PPO('MlpPolicy', env, verbose=1)
-model.learn(total_timesteps=10000)
+model = PPO("MlpPolicy", env, verbose=1)
+model.learn(total_timesteps=10_000)
 
-obs = env.reset()
+vec_env = model.get_env()
+obs = vec_env.reset()
 for i in range(1000):
     action, _states = model.predict(obs, deterministic=True)
-    obs, reward, done, info = env.step(action)
-    env.render()
-    if done:
-        obs = env.reset()
+    obs, reward, done, info = vec_env.step(action)
+    vec_env.render()
+    # VecEnv resets automatically
+    # if done:
+    #   obs = vec_env.reset()
+
 ```
 
-Or just train a model with a one liner if [the environment is registered in Gym](https://github.com/openai/gym/wiki/Environments) and if [the policy is registered](https://stable-baselines3.readthedocs.io/en/master/guide/custom_policy.html):
+Or just train a model with a one liner if [the environment is registered in Gymnasium](https://gymnasium.farama.org/tutorials/gymnasium_basics/environment_creation/) and if [the policy is registered](https://stable-baselines3.readthedocs.io/en/master/guide/custom_policy.html):
 
 ```python
 from stable_baselines3 import PPO
 
-model = PPO('MlpPolicy', 'CartPole-v1').learn(10000)
+model = PPO("MlpPolicy", "CartPole-v1").learn(10_000)
 ```
 
 """  # noqa:E501
+
+# Atari Games download is sometimes problematic:
+# https://github.com/Farama-Foundation/AutoROM/issues/39
+# That's why we define extra packages without it.
+extra_no_roms = [
+    # For render
+    "opencv-python",
+    "pygame",
+    # Tensorboard support
+    "tensorboard>=2.9.1",
+    # Checking memory taken by replay buffer
+    "psutil",
+    # For progress bar callback
+    "tqdm",
+    "rich",
+    # For atari games,
+    "shimmy[atari]~=1.3.0",
+    "pillow",
+]
+
+extra_packages = extra_no_roms + [  # noqa: RUF005
+    # For atari roms,
+    "autorom[accept-rom-license]~=0.6.1",
+]
 
 
 setup(
@@ -73,9 +100,9 @@ setup(
     packages=[package for package in find_packages() if package.startswith("stable_baselines3")],
     package_data={"stable_baselines3": ["py.typed", "version.txt"]},
     install_requires=[
-        "gym>=0.17",
-        "numpy",
-        "torch>=1.4.0",
+        "gymnasium>=0.28.1,<0.30",
+        "numpy>=1.20,<2.0",  # PyTorch not compatible https://github.com/pytorch/pytorch/issues/107302
+        "torch>=1.13",
         # For saving models
         "cloudpickle",
         # For reading logs
@@ -91,47 +118,51 @@ setup(
             "pytest-env",
             "pytest-xdist",
             # Type check
-            "pytype",
-            # Lint code
-            "flake8>=3.8",
-            # Find likely bugs
-            "flake8-bugbear",
-            # Sort imports
-            "isort>=5.0",
+            "mypy",
+            # Lint code and sort imports (flake8 and isort replacement)
+            "ruff>=0.3.1",
             # Reformat
-            "black",
+            "black>=24.2.0,<25",
         ],
         "docs": [
-            "sphinx",
+            "sphinx>=5,<8",
             "sphinx-autobuild",
-            "sphinx-rtd-theme",
+            "sphinx-rtd-theme>=1.3.0",
             # For spelling
             "sphinxcontrib.spelling",
-            # Type hints support
-            "sphinx-autodoc-typehints",
+            # Copy button for code snippets
+            "sphinx_copybutton",
         ],
-        "extra": [
-            # For render
-            "opencv-python",
-            # For atari games,
-            "atari_py~=0.2.0",
-            "pillow",
-            # Tensorboard support
-            "tensorboard>=2.2.0",
-            # Checking memory taken by replay buffer
-            "psutil",
-        ],
+        "extra": extra_packages,
+        "extra_no_roms": extra_no_roms,
     },
     description="Pytorch version of Stable Baselines, implementations of reinforcement learning algorithms.",
     author="Antonin Raffin",
     url="https://github.com/DLR-RM/stable-baselines3",
     author_email="antonin.raffin@dlr.de",
     keywords="reinforcement-learning-algorithms reinforcement-learning machine-learning "
-    "gym openai stable baselines toolbox python data-science",
+    "gymnasium gym openai stable baselines toolbox python data-science",
     license="MIT",
     long_description=long_description,
     long_description_content_type="text/markdown",
     version=__version__,
+    python_requires=">=3.8",
+    # PyPI package information.
+    project_urls={
+        "Code": "https://github.com/DLR-RM/stable-baselines3",
+        "Documentation": "https://stable-baselines3.readthedocs.io/",
+        "Changelog": "https://stable-baselines3.readthedocs.io/en/master/misc/changelog.html",
+        "SB3-Contrib": "https://github.com/Stable-Baselines-Team/stable-baselines3-contrib",
+        "RL-Zoo": "https://github.com/DLR-RM/rl-baselines3-zoo",
+        "SBX": "https://github.com/araffin/sbx",
+    },
+    classifiers=[
+        "Programming Language :: Python :: 3",
+        "Programming Language :: Python :: 3.8",
+        "Programming Language :: Python :: 3.9",
+        "Programming Language :: Python :: 3.10",
+        "Programming Language :: Python :: 3.11",
+    ],
 )
 
 # python setup.py sdist

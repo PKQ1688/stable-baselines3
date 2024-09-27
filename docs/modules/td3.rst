@@ -19,6 +19,7 @@ We recommend reading `OpenAI Spinning guide on TD3 <https://spinningup.openai.co
 
     MlpPolicy
     CnnPolicy
+    MultiInputPolicy
 
 
 Notes
@@ -38,7 +39,7 @@ Can I use?
 ----------
 
 -  Recurrent policies: ❌
--  Multi processing: ❌
+-  Multi processing: ✔️
 -  Gym spaces:
 
 
@@ -49,21 +50,24 @@ Discrete      ❌      ✔️
 Box           ✔️       ✔️
 MultiDiscrete ❌      ✔️
 MultiBinary   ❌      ✔️
+Dict          ❌     ✔️
 ============= ====== ===========
 
 
 Example
 -------
 
+This example is only to demonstrate the use of the library and its functions, and the trained agents may not solve the environments. Optimized hyperparameters can be found in RL Zoo `repository <https://github.com/DLR-RM/rl-baselines3-zoo>`_.
+
 .. code-block:: python
 
-  import gym
+  import gymnasium as gym
   import numpy as np
 
   from stable_baselines3 import TD3
   from stable_baselines3.common.noise import NormalActionNoise, OrnsteinUhlenbeckActionNoise
 
-  env = gym.make("Pendulum-v0")
+  env = gym.make("Pendulum-v1", render_mode="rgb_array")
 
   # The noise objects for TD3
   n_actions = env.action_space.shape[-1]
@@ -72,17 +76,17 @@ Example
   model = TD3("MlpPolicy", env, action_noise=action_noise, verbose=1)
   model.learn(total_timesteps=10000, log_interval=10)
   model.save("td3_pendulum")
-  env = model.get_env()
+  vec_env = model.get_env()
 
   del model # remove to demonstrate saving and loading
 
   model = TD3.load("td3_pendulum")
 
-  obs = env.reset()
+  obs = vec_env.reset()
   while True:
       action, _states = model.predict(obs)
-      obs, rewards, dones, info = env.step(action)
-      env.render()
+      obs, rewards, dones, info = vec_env.step(action)
+      vec_env.render("human")
 
 Results
 -------
@@ -164,4 +168,7 @@ TD3 Policies
   :noindex:
 
 .. autoclass:: CnnPolicy
+  :members:
+
+.. autoclass:: MultiInputPolicy
   :members:
